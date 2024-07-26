@@ -2,29 +2,49 @@
 ##  项目目录
 ```angular2html
 项目目录/
-│  videoTracker
-│  train.py
+│  
+│  train_detection.py
+│  train_classification.py
 │  yolov8n.pt
+│  yolov8n-cls.pt
+│  main.py
+│  detection.py
+│  classification.py
+│  config.py
 │  requirements.txt
 │  readme.md
-│
-├─data/
+│  
+├─detect_data/
 │   │  data.yaml
 │   │
 │   ├─test/
 │   │  │
 │   │  ├─images/
-│   │  │
 │   │  └─labels/
 │   │
 │   ├─train/
 │   │  │
 │   │  ├─images/
-│   │  │
 │   │  └─labels/
+│   │
+│   ├─valid/
+│   │   │
+│   │   ├─images/
+│   │   └─labels/
+│
+├─cls_data/
+│   │
+│   ├─test/
+│   │  │
+│   │  ├─garbage/
+│   │  └─water/
+│   │
+│   ├─train/
+│   │  │
+│   │  ├─garbage/
+│   │  └─water/
 │   │
 │   ├─val/
 │   │   │
-│   │   ├─images/
-│   │   │
-│   │   └─labels/
+│   │   ├─garbage/
+│   │   └─water/
