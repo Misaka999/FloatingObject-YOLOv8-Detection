@@ -1,5 +1,24 @@
+"""
+Track objects in video frames using a combination of YOLO and SAHI models.
+The detection results are processed and displayed on the video frames, which can be saved to an output file.
+The module also allows for interaction during the video playback, such as pausing, fast forwarding, and rewinding.
+
+Environment Variables:
+- VIDEO_SAVE: Whether to save the video with annotations (0 or 1).
+- DETECTION_INTERVAL: Number of frames between detections.
+- START_TIME: Start detection from the specified second in the video.
+- VIDEO_PATH: Path to the input video file.
+- OUTPUT_PATH: Path to the output video file.
+- YOLO_MODEL: Path to the YOLO model file.
+- SAHI_MODEL: Path to the SAHI model file.
+- SAHI_CONF_THRESHOLD: Confidence threshold for SAHI model.
+- YOLO_CONF_THRESHOLD: Confidence threshold for YOLO model.
+- DEVICE: Device to run the models on ('cpu' or 'cuda:0').
+"""
+
 import os
 import cv2
+import csv
 from sahi import AutoDetectionModel
 from sahi.predict import get_sliced_prediction
 from ultralytics import YOLO
@@ -8,6 +27,24 @@ from dotenv import load_dotenv
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 load_dotenv('.env')
+
+
+def compute_iou(box1, box2):
+    x1, y1, x2, y2 = box1
+    x1g, y1g, x2g, y2g = box2
+
+    xi1 = max(x1, x1g)
+    yi1 = max(y1, y1g)
+    xi2 = min(x2, x2g)
+    yi2 = min(y2, y2g)
+
+    inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+    box1_area = (x2 - x1) * (y2 - y1)
+    box2_area = (x2g - x1g) * (y2g - y1g)
+    union_area = box1_area + box2_area - inter_area
+
+    iou = inter_area / union_area
+    return iou
 
 
 class VideoTracker:
@@ -47,27 +84,12 @@ class VideoTracker:
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.frame_count = 0
         self.combined_results = []
+        self.all_results = []
         self.paused = False
-
-    def compute_iou(self, box1, box2):
-        x1, y1, x2, y2 = box1
-        x1g, y1g, x2g, y2g = box2
-
-        xi1 = max(x1, x1g)
-        yi1 = max(y1, y1g)
-        xi2 = min(x2, x2g)
-        yi2 = min(y2, y2g)
-
-        inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
-        box1_area = (x2 - x1) * (y2 - y1)
-        box2_area = (x2g - x1g) * (y2g - y1g)
-        union_area = box1_area + box2_area - inter_area
-
-        iou = inter_area / union_area
-        return iou
 
     def process_frame(self, frame):
         if self.frame_count % self.detection_interval == 0:
+            # Use SAHI to slice the original video (2560*1440) into four regions and detect
             # 用SAHI把原视频（2560*1440）切成四个区域并检测
             sahi_results = get_sliced_prediction(
                 frame,
@@ -95,13 +117,14 @@ class VideoTracker:
                 sahi_clss.append(clss2)
                 sahi_confs.append(conf2)
 
-            # 不用SAHI，单纯用yolov8检测
+            # Detect using yolov8 without SAHI  不用SAHI，单纯用yolov8检测
             yolo_results = self.yolo_model.track(frame, persist=True, conf=self.yolo_conf_threshold, iou=0.5)
             yolo_boxes = yolo_results[0].boxes.xyxy.tolist()
             yolo_classes = yolo_results[0].boxes.cls.tolist()
             yolo_names = yolo_results[0].names
             yolo_confs = yolo_results[0].boxes.conf.tolist()
 
+            # Compare and merge results using IoU and confidence scores
             # 用iou和置信值比较并合并两种检测结果
             self.combined_results = []
             for s_box, s_cls, s_conf in zip(sahi_boxes, sahi_clss, sahi_confs):
@@ -109,7 +132,7 @@ class VideoTracker:
                 best_match_iou = 0
                 for idx, (y_box, y_cls, y_conf) in enumerate(zip(yolo_boxes, yolo_classes, yolo_confs)):
                     if yolo_names[int(y_cls)] == s_cls:
-                        iou = self.compute_iou(s_box, y_box)
+                        iou = compute_iou(s_box, y_box)
                         if iou > best_match_iou:
                             best_match_iou = iou
                             best_match_idx = idx
@@ -125,9 +148,14 @@ class VideoTracker:
                     self.combined_results.append((s_box, s_cls, s_conf))
 
             for y_box, y_cls, y_conf in zip(yolo_boxes, yolo_classes, yolo_confs):
-                if not any(self.compute_iou(y_box, s_box) > 0.5 for s_box in sahi_boxes):
+                if not any(compute_iou(y_box, s_box) > 0.5 for s_box in sahi_boxes):
                     self.combined_results.append((y_box, yolo_names[int(y_cls)], y_conf))
 
+            # Save results for each detection interval 保存每一检测间隔的结果
+            for box, cls, conf in self.combined_results:
+                self.all_results.append((self.frame_count, box, cls, conf))
+
+        # Display detection boxes and confidence scores on the frame
         # 在画面中展示检测框和置信值
         for box, cls, conf in self.combined_results:
             x1, y1, x2, y2 = box
@@ -153,7 +181,7 @@ class VideoTracker:
         while self.cap.isOpened():
             if not self.paused:
                 success, frame = self.cap.read()
-                if not success:  # 视频结束
+                if not success:   # Video over 视频结束
                     break
 
                 frame = self.process_frame(frame)
@@ -166,15 +194,15 @@ class VideoTracker:
                 self.frame_count += 1
 
             key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):  # 按“q”退出
+            if key == ord("q"):  # Press "q" to quit  按“q”退出
                 break
-            elif key == ord("p"):   # 按“p”暂停
+            elif key == ord("p"):   # Press "p" to pause  按“p”暂停
                 self.paused = not self.paused
-            elif key == ord("f"):    # 按“f”快进5秒
+            elif key == ord("f"):    # Press "f" to fast forward 5 seconds  按“f”快进5秒
                 current_frame = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
                 new_frame_position = min(current_frame + self.fps * 5, self.total_frames - 1)
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, new_frame_position)
-            elif key == ord("b"):   # 按“b"后退5秒
+            elif key == ord("b"):   # Press "b" to rewind 5 seconds  按“b"后退5秒
                 current_frame = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
                 new_frame_position = max(current_frame - self.fps * 5, 0)
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, new_frame_position)
@@ -182,6 +210,17 @@ class VideoTracker:
         self.cap.release()
         self.video_writer.release()
         cv2.destroyAllWindows()
+
+        # Output detection boxes in csv format  以csv形式输出检测框
+        results_path = self.output_path.replace('.mp4', '_results.csv')
+        os.makedirs(os.path.dirname(results_path), exist_ok=True)
+        with open(results_path, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(['x1', 'y1', 'x2', 'y2'])
+            for result in self.all_results:
+                frame_number, box, cls, conf = result
+                x1, y1, x2, y2 = box
+                writer.writerow((frame_number, [x1, y1, x2, y2], cls, conf))
 
 
 if __name__ == '__main__':
